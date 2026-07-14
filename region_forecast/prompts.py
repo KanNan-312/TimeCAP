@@ -13,7 +13,7 @@ provides. Target: price. Time aspect: monthly date.
 """
 
 DISPLAY_NAMES = {
-    'price': 'Median Home Price (USD)',
+    'price': 'Housing Value Index',
     'median_sale_price': 'Median Sale Price (USD)',
     'median_list_price': 'Median List Price (USD)',
     'homes_sold': 'Homes Sold',
@@ -41,10 +41,11 @@ def format_series(values):
     return '|'.join(fmt.format(v) for v in vals)
 
 
-def indicator_block(cfg, window):
+def indicator_block(cfg, window, target_only=False):
     lines = [f"- {display_name(cfg.target_column)}: {format_series(window['target'])}"]
-    for col, vals in window['indicators'].items():
-        lines.append(f"- {display_name(col)}: {format_series(vals)}")
+    if not target_only:
+        for col, vals in window['indicators'].items():
+            lines.append(f"- {display_name(col)}: {format_series(vals)}")
     return '\n'.join(lines)
 
 
@@ -83,8 +84,7 @@ def contextualize_prompt(cfg, region_id, window):
         f"understanding the current regional housing market situation. Your report should be limited "
         f"to five sentences, yet comprehensive, highlighting key trends (e.g. pricing momentum, "
         f"supply and demand balance, market tightness) and considering their potential impact on home "
-        f"prices in this region over the coming months. Do not write numerical values while writing "
-        f"the report."
+        f"prices in this region over the coming months."
     )
     return system_prompt, user_prompt
 
@@ -133,10 +133,9 @@ def predict_text_prompt(cfg, region_id, window, text, forecast_dates):
     )
     user_prompt = (
         f"Your task is to forecast the {target_label(cfg)} in {label} for each of the next "
-        f"{cfg.horizon} months. Review the time-series data provided for the last {cfg.lookback} "
-        f"months. Each time-series consists of monthly values separated by a '|' token for the "
-        f"following indicators:\n\n"
-        f"{indicator_block(cfg, window)}\n\n"
+        f"{cfg.horizon} months. Review the {target_label(cfg)} data provided for the last {cfg.lookback} "
+        f"months. The historical time series consists of monthly values separated by a '|' token: \n\n"
+        f"{indicator_block(cfg, window, target_only=True)}\n\n"
         f"In addition, the housing market situation of the last {cfg.lookback} months is summarized "
         f"as follows:\n\n{text}\n\n"
         f"Based on both the time-series data and the summary above, {forecast_instruction(cfg, forecast_dates)}"
