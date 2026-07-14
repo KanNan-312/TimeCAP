@@ -37,7 +37,9 @@ from region_forecast import data as D
 from region_forecast import pipeline
 from region_forecast.config import Config
 from region_forecast.llm import LLMClient
+from dotenv import load_dotenv
 
+load_dotenv()
 
 def parse_args():
     p = argparse.ArgumentParser(
