@@ -206,7 +206,7 @@ def run_predict_stage(cfg, df, plans, indicator_cols, llm):
             text = read_text(summary_path(cfg, region_id, start)).replace('\n\n', ' ').strip()
             if cfg.mode == 'timecp':
                 system_prompt, user_prompt = prompts.predict_text_prompt(
-                    cfg, region_id, text, forecast_dates)
+                    cfg, region_id, window, text, forecast_dates)
             else:  # timecap
                 starts, vecs, texts = load_train_pool(region_id)
                 query_vec = embed_texts([text], cfg)[0]
@@ -214,13 +214,15 @@ def run_predict_stage(cfg, df, plans, indicator_cols, llm):
                 examples = []
                 for oi in order:
                     ex_start = starts[oi]
+                    ex_window = D.extract_window(frame, cfg, indicator_cols, ex_start - cfg.lookback, cfg.lookback)
                     ex_forecast = D.extract_window(frame, cfg, indicator_cols, ex_start, cfg.horizon)
                     examples.append({
                         'text': texts[ex_start].replace('\n\n', ' ').strip(),
+                        'series_block': prompts.indicator_block(cfg, ex_window),
                         'outcome': prompts.format_series(ex_forecast['target']),
                     })
                 system_prompt, user_prompt = prompts.predict_in_context_prompt(
-                    cfg, region_id, text, forecast_dates, examples)
+                    cfg, region_id, window, text, forecast_dates, examples)
 
         raw = llm.chat(system_prompt, user_prompt, expect_numeric=True, n_values=cfg.horizon)
         pred, parse_error = parsing.parse_forecast(raw, cfg.horizon)

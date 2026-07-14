@@ -114,51 +114,70 @@ def predict_time_prompt(cfg, region_id, window, forecast_dates):
 
 # ---------------------------------------------------------------------------
 # P3. Prediction based on text ("TimeCP" mode)
+#
+# The P1 report is deliberately non-numeric ("do not write numerical
+# values"), which is fine for the paper's classification tasks (direction /
+# threshold only) but starves a *regression* forecast of any sense of scale.
+# So here the text summary is paired with the same raw indicator block P2
+# uses, giving the model both the qualitative narrative and the numbers it
+# needs to anchor a multi-step numeric forecast.
 # ---------------------------------------------------------------------------
 
-def predict_text_prompt(cfg, region_id, text, forecast_dates):
+def predict_text_prompt(cfg, region_id, window, text, forecast_dates):
     label = region_label(region_id)
     system_prompt = (
-        f"Your job is to act as a professional regional real-estate forecaster. You will be given a "
-        f"housing market summary of the past {cfg.lookback} months for {label}. Based on this "
-        f"information, your task is to forecast the {target_label(cfg)} for each of the next "
-        f"{cfg.horizon} months."
+        f"Your job is to act as a professional regional real-estate forecaster. You will be given "
+        f"time-series data and a written summary of the housing market over the past {cfg.lookback} "
+        f"months for {label}. Based on this information, your task is to forecast the "
+        f"{target_label(cfg)} for each of the next {cfg.horizon} months."
     )
     user_prompt = (
         f"Your task is to forecast the {target_label(cfg)} in {label} for each of the next "
-        f"{cfg.horizon} months. The housing market situation of the last {cfg.lookback} months is "
-        f"summarized as follows:\n\n{text}\n\n"
-        f"Based on this information, {forecast_instruction(cfg, forecast_dates)}"
+        f"{cfg.horizon} months. Review the time-series data provided for the last {cfg.lookback} "
+        f"months. Each time-series consists of monthly values separated by a '|' token for the "
+        f"following indicators:\n\n"
+        f"{indicator_block(cfg, window)}\n\n"
+        f"In addition, the housing market situation of the last {cfg.lookback} months is summarized "
+        f"as follows:\n\n{text}\n\n"
+        f"Based on both the time-series data and the summary above, {forecast_instruction(cfg, forecast_dates)}"
     )
     return system_prompt, user_prompt
 
 
 # ---------------------------------------------------------------------------
-# P4. Prediction of TimeCAP (text + in-context retrieved examples)
+# P4. Prediction of TimeCAP (time series + text + in-context retrieved examples)
+#
+# Same rationale as P3: both the query window and every retrieved example
+# carry their raw lookback series next to the text, so the model has a
+# numeric scale to calibrate against, not just a qualitative narrative plus
+# a single outcome number.
 # ---------------------------------------------------------------------------
 
-def predict_in_context_prompt(cfg, region_id, text, forecast_dates, examples):
+def predict_in_context_prompt(cfg, region_id, window, text, forecast_dates, examples):
     label = region_label(region_id)
     k = len(examples)
     system_prompt = (
-        f"Your job is to act as a professional regional real-estate forecaster. You will be given a "
-        f"housing market summary of the past {cfg.lookback} months for {label}. Based on this "
-        f"information, your task is to forecast the {target_label(cfg)} for each of the next "
-        f"{cfg.horizon} months."
+        f"Your job is to act as a professional regional real-estate forecaster. You will be given "
+        f"time-series data and a written summary of the housing market over the past {cfg.lookback} "
+        f"months for {label}. Based on this information, your task is to forecast the "
+        f"{target_label(cfg)} for each of the next {cfg.horizon} months."
     )
 
     parts = [
         f"Your task is to forecast the {target_label(cfg)} in {label} for each of the next "
         f"{cfg.horizon} months.",
-        f"First, review the following {k} examples of housing market summaries from other periods in "
-        f"this region's own history and their actual {cfg.horizon}-month outcomes, so you can refer "
-        f"to them when forecasting.\n",
+        f"First, review the following {k} examples of housing market time-series data and summaries "
+        f"from other periods in this region's own history, and their actual {cfg.horizon}-month "
+        f"outcomes, so you can refer to them when forecasting.\n",
     ]
     for idx, ex in enumerate(examples, 1):
-        parts.append(f"Summary #{idx}: {ex['text']}")
-        parts.append(f"Outcome #{idx} (next {cfg.horizon} months, {target_label(cfg)}): {ex['outcome']}\n")
+        parts.append(f"Example #{idx} time-series (last {cfg.lookback} months):\n{ex['series_block']}")
+        parts.append(f"Example #{idx} summary: {ex['text']}")
+        parts.append(f"Example #{idx} outcome (next {cfg.horizon} months, {target_label(cfg)}): {ex['outcome']}\n")
 
     parts.append(
+        f"The current time-series data for the last {cfg.lookback} months is as follows:\n"
+        f"{indicator_block(cfg, window)}\n\n"
         f"The housing market situation of the last {cfg.lookback} months is summarized as follows:\n\n"
         f"Summary: {text}\nOutcome:\n\n"
         f"Refer to the provided examples and {forecast_instruction(cfg, forecast_dates)}"
