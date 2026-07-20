@@ -44,8 +44,16 @@ Both methods:
     each retrieved case's own horizon, not raw price levels, and never
     surface which region/period a match came from - only its rank,
     distance, and outcome (see serialize.py). Internal-only bookkeeping
-    keys (region_id/start, prefixed with '_') are kept on each result for
-    our own checkpoint files but are never read by the text serializer.
+    keys (region_id/start/anchor_date, prefixed with '_') are kept on each
+    result and persisted in the checkpoint files (features/*.json and
+    experience_store.json) so a specific retrieved precedent can be traced
+    back to its real region/date later if needed for debugging or analysis -
+    that lookup only ever happens outside the LLM-facing text.
+  - are optional per query, not compulsory: if cfg.experience_max_distance
+    is set, candidates farther than that threshold are never retrieved, even
+    if fewer than experience_k remain (down to zero). A query with no
+    genuinely similar training-pool pattern should surface no precedent at
+    all rather than a misleadingly weak one.
 
 The fitted store is persisted to disk (<prefix>.json + <prefix>.npz) by
 pipeline.run_experience_stage, mirroring the baseline's TimeCAP
@@ -150,10 +158,10 @@ class ExperienceStore:
     def fit(self, train_cases):
         """
         train_cases: list of dicts, one per training-pool (region, window),
-        each {'region_id', 'start', 'window', 'history', 'outcome'} (see
-        pipeline.run_experience_stage). Cases whose outcome can't be
-        expressed as a relative % change (e.g. a zero/missing last-known
-        value) are dropped.
+        each {'region_id', 'start', 'anchor_date', 'window', 'history',
+        'outcome'} (see pipeline.run_experience_stage). Cases whose outcome
+        can't be expressed as a relative % change (e.g. a zero/missing
+        last-known value) are dropped.
         """
         self._cases, vecs = [], []
         for case in train_cases:
@@ -168,7 +176,10 @@ class ExperienceStore:
                 continue
 
             vecs.append(vec)
-            self._cases.append({'region_id': case['region_id'], 'start': case['start'], **outcome_stats})
+            self._cases.append({
+                'region_id': case['region_id'], 'start': case['start'],
+                'anchor_date': case.get('anchor_date'), **outcome_stats,
+            })
 
         self._fitted = True
         if not vecs:
@@ -198,10 +209,14 @@ class ExperienceStore:
         region's current situation, nearest first, as de-identified dicts:
         {'rank', 'distance', 'horizon', 'cum_pct_change',
         'median_step_pct_change', 'direction', 'method'} plus internal
-        '_region_id'/'_start' bookkeeping (never rendered into prompt text -
-        see serialize.experience_block). Returns [] if the store hasn't
-        been fitted, has no usable cases, or the query window itself lacks
-        enough valid history to build a representation.
+        '_region_id'/'_start'/'_anchor_date' bookkeeping (never rendered
+        into prompt text - see serialize.experience_block - but persisted in
+        the caller's checkpoint file so a specific precedent can be traced
+        back to its real region/date later if needed). Returns [] if the
+        store hasn't been fitted, has no usable cases, the query window
+        itself lacks enough valid history to build a representation, or
+        (when cfg.experience_max_distance is set) nothing in the pool is
+        close enough to clear the similarity threshold.
         """
         if not self._fitted or self._matrix is None or not self._cases:
             return []
@@ -217,12 +232,16 @@ class ExperienceStore:
 
         order = np.argsort(dists)
         min_gap = self.cfg.effective_experience_min_gap_months
+        max_dist = self.cfg.experience_max_distance
 
         selected_starts_by_region = {}
         results = []
         for idx in order:
             if len(results) >= k:
                 break
+            d = float(dists[idx])
+            if max_dist is not None and d > max_dist:
+                break  # `order` is ascending, so nothing further can clear the threshold either
             case = self._cases[idx]
             cid, cstart = case['region_id'], case['start']
             prior = selected_starts_by_region.get(cid, [])
@@ -231,13 +250,13 @@ class ExperienceStore:
             selected_starts_by_region.setdefault(cid, []).append(cstart)
             results.append({
                 'rank': len(results) + 1,
-                'distance': round(float(dists[idx]), 4),
+                'distance': round(d, 4),
                 'horizon': self.cfg.horizon,
                 'cum_pct_change': case['cum_pct_change'],
                 'median_step_pct_change': case['median_step_pct_change'],
                 'direction': case['direction'],
                 'method': self.method,
-                '_region_id': cid, '_start': cstart,
+                '_region_id': cid, '_start': cstart, '_anchor_date': case.get('anchor_date'),
             })
         return results
 

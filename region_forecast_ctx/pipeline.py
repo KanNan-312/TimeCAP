@@ -4,11 +4,11 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 import pandas as pd
 from tqdm import tqdm
 
-from region_forecast import parsing
 from region_forecast.metrics import compute_metrics
 from region_forecast.utils import ensure_dir, read_json, read_text, write_json, write_text
 
 from region_forecast_ctx import data as D
+from region_forecast_ctx import parsing as ctx_parsing
 from region_forecast_ctx import prompts
 from region_forecast_ctx.features import compute_target_features
 from region_forecast_ctx.features.spatial_features import SpatialIndex, compute_neighbor_context
@@ -217,12 +217,17 @@ def run_experience_stage(cfg, df, plans, indicator_cols, experience_store):
         if plan['status'] != 'ok':
             continue
         frame = frames[region_id]
+        dates_str = frame[cfg.date_column].dt.strftime('%Y-%m-%d')
         for start in plan['train_starts']:
             window = D.extract_window(frame, cfg, indicator_cols, start - cfg.lookback, cfg.lookback)
             history = D.extract_history(frame, cfg, indicator_cols, start)
             outcome = D.extract_window(frame, cfg, indicator_cols, start, cfg.horizon)
+            # Real calendar date of the last known month for this case -
+            # kept only for internal traceback (checkpoint files / store),
+            # never surfaced in LLM-facing text (see features/experience.py).
+            anchor_date = dates_str.iloc[start - 1] if start > 0 else None
             train_cases.append({
-                'region_id': region_id, 'start': start,
+                'region_id': region_id, 'start': start, 'anchor_date': anchor_date,
                 'window': window, 'history': history, 'outcome': outcome['target'],
             })
 
@@ -234,10 +239,37 @@ def run_experience_stage(cfg, df, plans, indicator_cols, experience_store):
 
 # ---------------------------------------------------------------------------
 # Stage 3: predict (P2 for timeseries mode / P3 for timecp_ctx) - test
-# windows only. Prompt shape here is identical to the baseline TimeCP mode;
-# the ablation only changes what the P1 summary text (fed in as `text`)
-# contains.
+# windows only. Prompt shape here is identical to the baseline TimeCP mode
+# except for two enrichments (both region_forecast_ctx-only - the baseline
+# templates/parser are untouched):
+#   - the LLM is asked to return a small JSON object (prediction + rationale
+#     + which categories of information it says it used) instead of a bare
+#     '|'-separated number string, so a forecast's reasoning and claimed
+#     information sources are inspectable, not just its numbers;
+#   - if ctx_correlation found indicator(s) strongly correlated with the
+#     target (see features/target_features.compute_correlation), their own
+#     lookback series is shown alongside the target's, not just the
+#     correlation-coefficient sentence in the P1 text.
 # ---------------------------------------------------------------------------
+
+def _correlated_indicator_names(cfg, region_id, start):
+    """
+    Indicator names the contextualize stage found strongly correlated with
+    the target for this specific window (see target_features.compute_correlation),
+    read back from the features/*.json checkpoint it wrote. None if
+    unavailable (mode == 'timeseries', ctx_correlation/ctx_show_correlated_series
+    off, or the contextualize stage hasn't run yet for this window).
+    """
+    if cfg.mode != 'timecp_ctx' or not cfg.ctx_correlation or not cfg.ctx_show_correlated_series:
+        return None
+    fpath = features_path(cfg, region_id, start)
+    if not os.path.exists(fpath):
+        return None
+    feats = read_json(fpath)
+    corr = ((feats.get('target') or {}).get('correlation') or {})
+    names = [name for name, _r in corr.get('correlations', [])]
+    return names or None
+
 
 def run_predict_stage(cfg, df, plans, indicator_cols, llm):
     frames = _ok_frames(cfg, df, plans)
@@ -262,18 +294,21 @@ def run_predict_stage(cfg, df, plans, indicator_cols, llm):
         true_values = forecast_window['target']
 
         if cfg.mode == 'timeseries':
-            system_prompt, user_prompt = prompts.predict_time_prompt(cfg, region_id, window, forecast_dates)
+            system_prompt, user_prompt = prompts.predict_time_prompt_structured(cfg, region_id, window, forecast_dates)
         else:  # timecp_ctx
             # build_context_text() produces a structured, section-headed
             # block (not free-form prose like the baseline's LLM report),
             # so its blank lines are preserved rather than collapsed.
             text = read_text(summary_path(cfg, region_id, start)).strip()
-            system_prompt, user_prompt = prompts.predict_text_prompt(cfg, region_id, window, text, forecast_dates)
+            correlated_names = _correlated_indicator_names(cfg, region_id, start)
+            system_prompt, user_prompt = prompts.predict_text_prompt_structured(
+                cfg, region_id, window, text, forecast_dates, correlated_names)
 
         raw = llm.chat(system_prompt, user_prompt, expect_numeric=True, n_values=cfg.horizon)
-        pred, parse_error = parsing.parse_forecast(raw, cfg.horizon)
+        pred, rationale, information_source, parse_error = ctx_parsing.parse_structured_forecast(
+            raw, cfg.horizon, expect_json=cfg.predict_thinking)
 
-        write_json(prediction_path(cfg, region_id, start), {
+        record = {
             'region_id': region_id,
             'target_start': start,
             'lookback_dates': window['dates'],
@@ -282,7 +317,11 @@ def run_predict_stage(cfg, df, plans, indicator_cols, llm):
             'pred': pred,
             'true': true_values,
             'parse_error': parse_error,
-        })
+        }
+        if cfg.predict_thinking:
+            record['rationale'] = rationale
+            record['information_source'] = information_source
+        write_json(prediction_path(cfg, region_id, start), record)
 
     _run_tasks(tasks, worker, cfg.workers, 'predict')
 

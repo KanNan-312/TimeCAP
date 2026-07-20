@@ -31,14 +31,32 @@ Three escalating, independently-ablatable context levels feed it:
                     an aggregated, de-identified outcome summary (median/
                     range/direction-agreement across the top-k analogs),
                     never which region/period a match came from - see
-                    features/experience.py.
+                    features/experience.py. Retrieval is optional per query:
+                    set --experience-max-distance to drop candidates beyond
+                    that similarity threshold instead of always returning
+                    experience_k matches however weak.
 
 De-identification: nothing sent to the forecasting LLM ever names a zipcode
 or exact calendar date - geographic neighbors appear only as "Neighbor 1",
-"Neighbor 2", ... ranked by distance. This is to prevent the model from
-substituting memorized knowledge of a specific real ZIP/period for genuine
-reasoning over the provided data. Local checkpoint files (features/*.json)
-still carry region_id for our own bookkeeping - that's not sent to the LLM.
+"Neighbor 2", ... ranked by distance, and retrieved precedents only by rank/
+distance/outcome. This is to prevent the model from substituting memorized
+knowledge of a specific real ZIP/period for genuine reasoning over the
+provided data. Local checkpoint files (features/*.json, experience_store.json)
+still carry the real region_id/start-index/anchor_date for every neighbor and
+retrieved precedent - never sent to the LLM, but there specifically so a
+given prompt's context can be traced back to the real regions/periods behind
+it later if needed.
+
+Predict-stage output: by default the LLM returns the same bare
+'|'-separated number string as the baseline. Pass --thinking to instead ask
+for a small JSON object - prediction, a short rationale, and which
+categories of information (target_series / neighbor_information /
+historical_precedent) it says it relied on - so a forecast's reasoning is
+inspectable, not just its numbers (region_forecast_ctx/prompts.py,
+region_forecast_ctx/parsing.py). Independently of --thinking: if
+ctx_correlation found indicator(s) strongly correlated with the target,
+their lookback series is shown next to the target's at predict time too
+(--no-correlated-series-in-predict to turn that off).
 
 Example (dry run, sanity-check plumbing, no API calls):
 
@@ -98,9 +116,13 @@ def parse_args():
     p.add_argument('--momentum-short-months', type=int, default=3)
     p.add_argument('--momentum-compare-months', type=int, default=3)
     p.add_argument('--stl-period', type=int, default=12)
-    p.add_argument('--volatility-recent-months', type=int, default=6)
+    p.add_argument('--volatility-recent-months', type=int, default=12)
     p.add_argument('--correlation-top-n', type=int, default=3)
     p.add_argument('--correlation-min-abs', type=float, default=0.3)
+    p.add_argument('--no-correlated-series-in-predict', dest='ctx_show_correlated_series', action='store_false',
+                    help='by default, indicator(s) found strongly correlated with the target also have their '
+                         'own lookback series shown at predict time, not just a correlation-coefficient sentence')
+    p.set_defaults(ctx_show_correlated_series=True)
 
     p.add_argument('--no-spatial', dest='ctx_spatial', action='store_false')
     p.set_defaults(ctx_spatial=True)
@@ -120,12 +142,22 @@ def parse_args():
     p.add_argument('--experience-min-gap-months', type=int, default=None,
                     help='min start-index gap between two retrieved analogs from the same region '
                          '(default: = --lookback, i.e. no overlapping analogs)')
+    p.add_argument('--experience-max-distance', type=float, default=None,
+                    help='similarity threshold in the active --experience-method\'s distance units; candidates '
+                         'farther than this are never retrieved, even if fewer than --experience-k remain '
+                         '(default: None = no threshold, always return up to experience-k nearest)')
 
     p.add_argument('--model', default='openai/gpt-4o-mini')
     p.add_argument('--api-base', default='https://openrouter.ai/api/v1')
     p.add_argument('--api-key-env', default='OPENROUTER_API_KEY')
     p.add_argument('--temperature', type=float, default=0.7)
     p.add_argument('--max-tokens', type=int, default=1024)
+
+    p.add_argument('--thinking', dest='predict_thinking', action='store_true',
+                    help='ask the LLM to also return a rationale + information_source alongside the prediction, '
+                         'as a JSON object; default: prediction only, plain \'|\'-separated numeric output '
+                         '(same output contract as the baseline)')
+    p.set_defaults(predict_thinking=False)
 
     p.add_argument('--workers', type=int, default=4)
     p.add_argument('--dry-run', action='store_true')
@@ -167,6 +199,7 @@ def build_config(args):
         volatility_recent_months=args.volatility_recent_months,
         correlation_top_n=args.correlation_top_n,
         correlation_min_abs=args.correlation_min_abs,
+        ctx_show_correlated_series=args.ctx_show_correlated_series,
         ctx_spatial=args.ctx_spatial,
         spatial_k=args.spatial_k,
         spatial_max_km=args.spatial_max_km,
@@ -177,6 +210,8 @@ def build_config(args):
         experience_method=args.experience_method,
         experience_shape_metric=args.experience_shape_metric,
         experience_min_gap_months=args.experience_min_gap_months,
+        experience_max_distance=args.experience_max_distance,
+        predict_thinking=args.predict_thinking,
         model=args.model,
         api_base=args.api_base,
         api_key_env=args.api_key_env,

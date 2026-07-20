@@ -57,6 +57,12 @@ class Config(BaseConfig):
     volatility_recent_months: int = 6
     correlation_top_n: int = 3
     correlation_min_abs: float = 0.3
+    # show the actual lookback series of the top correlated indicator(s) (not
+    # just their correlation coefficients) next to the target series at
+    # predict time - independently ablatable from ctx_correlation itself,
+    # which only controls whether the narrative "Correlated indicators:"
+    # sentence appears in the P1 text block.
+    ctx_show_correlated_series: bool = True
 
     # --- level-2 component toggle + params (spatio-temporal context) -----
     ctx_spatial: bool = True
@@ -71,6 +77,25 @@ class Config(BaseConfig):
     experience_method: str = 'features'  # 'features' (k-NN on scale-invariant stats) | 'shape' (z-normalized series)
     experience_shape_metric: str = 'euclidean'  # 'euclidean' | 'dtw' - only used when experience_method == 'shape'
     experience_min_gap_months: Optional[int] = None  # None => defaults to `lookback` (no overlapping same-region analogs)
+    # Similarity threshold: candidates farther than this (in the active
+    # method's distance units - z-scored feature-space Euclidean for
+    # 'features', z-normalized-series Euclidean/DTW for 'shape') are never
+    # retrieved, even if fewer than experience_k remain. None => no
+    # threshold (always return up to experience_k nearest, however weak the
+    # match). This makes precedent retrieval optional per-query rather than
+    # compulsory: a region/window with no genuinely similar training-pool
+    # pattern should surface no precedent at all rather than a misleading one.
+    experience_max_distance: Optional[float] = None
+
+    # --- predict-stage output shape ---------------------------------------
+    # False (default): ask for the prediction only, plain '|'-separated
+    # numeric output - same output contract as the baseline. True: also ask
+    # for a short rationale and which information_source categories
+    # (target_series / neighbor_information / historical_precedent) the
+    # model says it relied on, as a JSON object - see prompts.py /
+    # parsing.py. Independent of context_level/ctx_* - it only changes what
+    # the LLM is asked to *return*, not what context it's given.
+    predict_thinking: bool = False
 
     def validate(self):
         if self.mode not in ('timeseries', 'timecp_ctx'):
@@ -86,6 +111,8 @@ class Config(BaseConfig):
             raise ValueError(f'unknown experience_method: {self.experience_method}')
         if self.experience_shape_metric not in ('euclidean', 'dtw'):
             raise ValueError(f'unknown experience_shape_metric: {self.experience_shape_metric}')
+        if self.experience_max_distance is not None and self.experience_max_distance <= 0:
+            raise ValueError('experience_max_distance must be positive if set')
 
     @property
     def spatial_enabled(self):
@@ -118,6 +145,8 @@ class Config(BaseConfig):
         if self.ctx_correlation:
             comp.append('corr')
         parts.append('+'.join(comp) if comp else 'none')
+        if self.ctx_correlation and self.ctx_show_correlated_series:
+            parts.append('seriescorr')
         if self.context_level >= 2:
             parts.append('spatial' if self.ctx_spatial else 'nospatial')
         if self.context_level >= 3:
@@ -125,9 +154,13 @@ class Config(BaseConfig):
                 tag = f'exp-{self.experience_method}'
                 if self.experience_method == 'shape':
                     tag += f'-{self.experience_shape_metric}'
+                if self.experience_max_distance is not None:
+                    tag += f'-th{self.experience_max_distance:g}'
                 parts.append(tag)
             else:
                 parts.append('noexp')
+        if self.predict_thinking:
+            parts.append('think')
         return '_'.join(parts)
 
     @property
