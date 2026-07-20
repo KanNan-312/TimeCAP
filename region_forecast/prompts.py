@@ -53,10 +53,9 @@ def region_label(region_id):
     return f"ZIP code {region_id}"
 
 
-def forecast_instruction(cfg, forecast_dates):
+def forecast_instruction(cfg):
     return (
-        f"forecast the {target_label(cfg)} for each of the next {cfg.horizon} months, "
-        f"from {forecast_dates[0]} to {forecast_dates[-1]}. "
+        f"forecast the {target_label(cfg)} for each of the next {cfg.horizon} months."
         f"Respond with exactly {cfg.horizon} numeric values separated by '|' tokens, in chronological "
         f"order, with no other text, labels, units, or currency symbols "
         f"(e.g. 412345.67|415012.10|...). Do not provide any other details or explanation."
@@ -75,8 +74,7 @@ def contextualize_prompt(cfg, region_id, window):
         "housing market situation."
     )
     user_prompt = (
-        f"Your task is to analyze key housing market indicators in {label} over the last "
-        f"{cfg.lookback} months (from {window['dates'][0]} to {window['dates'][-1]}). "
+        f"Your task is to analyze key housing market indicators in a region over the last {cfg.lookback} months."
         f"Review the time-series data provided for the last {cfg.lookback} months. Each time-series "
         f"consists of monthly values separated by a '|' token for the following indicators:\n"
         f"{indicator_block(cfg, window)}\n\n"
@@ -97,17 +95,16 @@ def predict_time_prompt(cfg, region_id, window, forecast_dates):
     label = region_label(region_id)
     system_prompt = (
         f"Your job is to act as a professional regional real-estate forecaster. You will be given "
-        f"time-series data of housing market indicators from the past {cfg.lookback} months for "
-        f"{label}. Based on this information, your task is to forecast the {target_label(cfg)} for "
+        f"time-series data of housing market indicators from the past {cfg.lookback} months for a specific region."
+        f"Based on this information, your task is to forecast the {target_label(cfg)} for "
         f"each of the next {cfg.horizon} months."
     )
     user_prompt = (
-        f"Your task is to forecast the {target_label(cfg)} in {label} for each of the next "
-        f"{cfg.horizon} months. Review the time-series data provided for the last {cfg.lookback} "
-        f"months. Each time-series consists of monthly values separated by a '|' token for the "
-        f"following indicators:\n\n"
-        f"{indicator_block(cfg, window)}\n\n"
-        f"Based on this information, {forecast_instruction(cfg, forecast_dates)}"
+        f"Your task is to forecast the {target_label(cfg)} in one region for each of the next "
+        f"{cfg.horizon} months. Review the {target_label(cfg)} data provided for the last {cfg.lookback} "
+        f"months. The historical time series consists of monthly values separated by a '|' token: \n\n"
+        f"{indicator_block(cfg, window, target_only=True)}\n\n"
+        f"Based on this information, {forecast_instruction(cfg)}"
     )
     return system_prompt, user_prompt
 
@@ -128,17 +125,17 @@ def predict_text_prompt(cfg, region_id, window, text, forecast_dates):
     system_prompt = (
         f"Your job is to act as a professional regional real-estate forecaster. You will be given "
         f"time-series data and a written summary of the housing market over the past {cfg.lookback} "
-        f"months for {label}. Based on this information, your task is to forecast the "
+        f"months for a specific region. Based on this information, your task is to forecast the "
         f"{target_label(cfg)} for each of the next {cfg.horizon} months."
     )
     user_prompt = (
-        f"Your task is to forecast the {target_label(cfg)} in {label} for each of the next "
+        f"Your task is to forecast the {target_label(cfg)} in one region for each of the next "
         f"{cfg.horizon} months. Review the {target_label(cfg)} data provided for the last {cfg.lookback} "
         f"months. The historical time series consists of monthly values separated by a '|' token: \n\n"
         f"{indicator_block(cfg, window, target_only=True)}\n\n"
         f"In addition, the housing market situation of the last {cfg.lookback} months is summarized "
         f"as follows:\n\n{text}\n\n"
-        f"Based on both the time-series data and the summary above, {forecast_instruction(cfg, forecast_dates)}"
+        f"Based on both the time-series data and the summary above, {forecast_instruction(cfg)}"
     )
     return system_prompt, user_prompt
 
@@ -163,8 +160,7 @@ def predict_in_context_prompt(cfg, region_id, window, text, forecast_dates, exam
     )
 
     parts = [
-        f"Your task is to forecast the {target_label(cfg)} in {label} for each of the next "
-        f"{cfg.horizon} months.",
+        f"Your task is to forecast the {target_label(cfg)} in a given region for each of the next {cfg.horizon} months."
         f"First, review the following {k} examples of housing market time-series data and summaries "
         f"from other periods in this region's own history, and their actual {cfg.horizon}-month "
         f"outcomes, so you can refer to them when forecasting.\n",
@@ -179,7 +175,7 @@ def predict_in_context_prompt(cfg, region_id, window, text, forecast_dates, exam
         f"{indicator_block(cfg, window)}\n\n"
         f"The housing market situation of the last {cfg.lookback} months is summarized as follows:\n\n"
         f"Summary: {text}\nOutcome:\n\n"
-        f"Refer to the provided examples and {forecast_instruction(cfg, forecast_dates)}"
+        f"Refer to the provided examples and {forecast_instruction(cfg)}"
     )
     user_prompt = '\n'.join(parts)
     return system_prompt, user_prompt
