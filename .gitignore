@@ -1,3 +1,7 @@
 .env
 
 /region_forecast/results
+
+__pycache__
+
+/region_forecast_ctx/results
