@@ -39,9 +39,13 @@ def _direction(a, b, eps=1e-9):
 # Data overview
 # ---------------------------------------------------------------------------
 
-def compute_data_overview(history_target, history_indicators, lookback_target):
+def compute_data_overview(history_target, history_indicators):
+    """
+    Summarizes the *entire* causal history to date (see data.extract_history)
+    - deliberately not restricted to the lookback window, so this reflects
+    everything known about the series, not just its most recent slice.
+    """
     h = _arr(history_target)
-    lb = _arr(lookback_target)
     n_total = int(len(h))
     n_valid = int(np.sum(~np.isnan(h)))
     missing_ratio = float((n_total - n_valid) / n_total) if n_total else None
@@ -50,8 +54,6 @@ def compute_data_overview(history_target, history_indicators, lookback_target):
         'n_observations_valid': n_valid,
         'missing_ratio_total': _round(missing_ratio),
         'n_variables': 1 + len(history_indicators),
-        'lookback_median': _round(np.nanmedian(lb)) if lb.size and not np.all(np.isnan(lb)) else None,
-        'lookback_std': _round(np.nanstd(lb)) if lb.size and not np.all(np.isnan(lb)) else None,
         'history_median': _round(np.nanmedian(h)) if h.size and not np.all(np.isnan(h)) else None,
         'history_std': _round(np.nanstd(h)) if h.size and not np.all(np.isnan(h)) else None,
     }

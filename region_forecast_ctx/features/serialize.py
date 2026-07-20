@@ -21,8 +21,7 @@ def data_overview_block(d):
     return (
         f"- Observations: {d['n_observations_valid']}/{d['n_observations_total']} valid "
         f"({_fmt((d['missing_ratio_total'] or 0) * 100, 1)}% missing), {d['n_variables']} variable(s) tracked\n"
-        f"- Level: lookback-window median={_fmt(d['lookback_median'])}, std={_fmt(d['lookback_std'])}; "
-        f"full-history median={_fmt(d['history_median'])}, std={_fmt(d['history_std'])}"
+        f"- Level (full history to date): median={_fmt(d['history_median'])}, std={_fmt(d['history_std'])}"
     )
 
 
@@ -73,13 +72,20 @@ def correlation_block(c):
 
 
 def spatial_block(s):
+    """
+    Neighbors are identified only by geographic rank ("Neighbor 1" =
+    nearest, etc.) plus distance and trend direction - never by zipcode, so
+    the model can't substitute memorized knowledge of a specific
+    neighboring ZIP for genuine reasoning over the provided data.
+    """
     if not s or s.get('status') != 'ok':
         reason = (s or {}).get('status', 'unavailable')
         return f'- Spatial context: {reason}'
     dc = s['direction_counts']
     lines = [
-        f"- Nearest {s['k']} geographic neighbor region(s): " + ', '.join(
-            f"{n['region_id']} ({n['distance_km']}km, {n['direction']})" for n in s['neighbors']
+        f"- Nearest {s['k']} geographic neighbor region(s), ranked by distance: " + ', '.join(
+            f"Neighbor {i} ({n['distance_km']}km, {n['direction']})"
+            for i, n in enumerate(s['neighbors'], 1)
         ),
         f"- Neighbor trend agreement: {dc['up']} up / {dc['down']} down / {dc['flat']} flat (of {s['k']})",
     ]

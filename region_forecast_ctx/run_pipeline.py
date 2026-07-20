@@ -3,16 +3,21 @@ region_forecast_ctx - an enriched-contextualization extension of the
 region_forecast TimeCP baseline (region_forecast/, unmodified - kept as the
 comparison baseline).
 
-Same P1 (contextualize) -> P3 (predict from text) skeleton as the baseline's
-`timecp` mode, but P1 is now assembled from a feature calculator instead of
-asking the LLM to eyeball the raw series, with three escalating,
-independently-ablatable context levels:
+P1 (contextualize) is no longer an LLM call: a feature calculator computes
+statistics from the data and serializes them directly into a compact text
+block (prompts.build_context_text) that P3 uses as-is. Deterministic,
+free, and reproducible - data -> prompt -> prediction, nothing in between.
+Three escalating, independently-ablatable context levels feed it:
 
-  context_level=1  target-series statistics: data overview, short-term
-                    momentum, long-term trend & STL seasonal structure,
-                    volatility & persistence (ACF, mean-reversion
-                    crossings), correlation with other indicators. Each
-                    is its own --no-<component> switch.
+  context_level=1  target-series statistics, computed over the region's
+                    *entire* causal history to date (not just the lookback
+                    window): data overview, long-term trend & STL seasonal
+                    structure, volatility & persistence (ACF, mean-reversion
+                    crossings), correlation with other indicators. Only
+                    short-term momentum (and "recent" volatility) look at a
+                    short recent slice, by design - see
+                    --momentum-short-months / --volatility-recent-months.
+                    Each component is its own --no-<component> switch.
   context_level=2  + spatio-temporal context: haversine distance over
                     latitude/longitude locates the top-k geographic
                     neighbors; reports their trend agreement and how this
@@ -20,6 +25,13 @@ independently-ablatable context levels:
   context_level=3  + experience retrieval from the training pool - wired
                     up end-to-end but a placeholder today (always returns
                     no cases; see features/experience.py).
+
+De-identification: nothing sent to the forecasting LLM ever names a zipcode
+or exact calendar date - geographic neighbors appear only as "Neighbor 1",
+"Neighbor 2", ... ranked by distance. This is to prevent the model from
+substituting memorized knowledge of a specific real ZIP/period for genuine
+reasoning over the provided data. Local checkpoint files (features/*.json)
+still carry region_id for our own bookkeeping - that's not sent to the LLM.
 
 Example (dry run, sanity-check plumbing, no API calls):
 
@@ -177,15 +189,18 @@ def main():
           f'(lookback={cfg.lookback}, horizon={cfg.horizon})')
     print(f'[plan] indicator columns: {indicator_cols}')
 
-    llm = LLMClient(cfg)
     spatial_index = pipeline.build_spatial_index(cfg, df, plans)
     experience_store = ExperienceStore(cfg)
 
+    # Contextualization is deterministic (no LLM), so LLMClient - which
+    # requires an API key unless --dry-run - is only constructed for the
+    # stage that actually needs it.
     if args.stage in ('contextualize', 'all'):
-        pipeline.run_contextualize_stage(cfg, df, plans, indicator_cols, llm, spatial_index, experience_store)
+        pipeline.run_contextualize_stage(cfg, df, plans, indicator_cols, spatial_index, experience_store)
     if args.stage in ('experience', 'all'):
         pipeline.run_experience_stage(cfg, df, plans, indicator_cols, experience_store)
     if args.stage in ('predict', 'all'):
+        llm = LLMClient(cfg)
         pipeline.run_predict_stage(cfg, df, plans, indicator_cols, llm)
     if args.stage in ('evaluate', 'all'):
         pipeline.run_evaluate_stage(cfg, plans)

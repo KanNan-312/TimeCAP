@@ -120,9 +120,13 @@ def build_spatial_index(cfg, df, plans):
 
 # ---------------------------------------------------------------------------
 # Stage 1: contextualize (P1) - skipped for mode == 'timeseries'.
+#
+# Deterministic, no LLM call: the feature calculator's output is serialized
+# straight into text (data -> prompt -> prediction, see prompts.py). This
+# also means the stage needs no API key and costs nothing to (re)run.
 # ---------------------------------------------------------------------------
 
-def run_contextualize_stage(cfg, df, plans, indicator_cols, llm, spatial_index, experience_store):
+def run_contextualize_stage(cfg, df, plans, indicator_cols, spatial_index, experience_store):
     if cfg.mode == 'timeseries':
         print('[contextualize] skipped (timeseries mode forecasts directly from numeric series)')
         return
@@ -142,15 +146,14 @@ def run_contextualize_stage(cfg, df, plans, indicator_cols, llm, spatial_index, 
                 continue
             tasks.append((region_id, start))
 
-    print(f'[contextualize] {len(tasks)} pending window(s) (context_level={cfg.context_level})')
+    print(f'[contextualize] {len(tasks)} pending window(s) (context_level={cfg.context_level}, deterministic - no LLM)')
 
     def worker(task):
         region_id, start = task
         frame = frames[region_id]
-        window = D.extract_window(frame, cfg, indicator_cols, start - cfg.lookback, cfg.lookback)
         history = D.extract_history(frame, cfg, indicator_cols, start)
 
-        feats = compute_target_features(cfg, window, history)
+        feats = compute_target_features(cfg, history)
 
         neighbor_ctx = None
         if cfg.spatial_enabled and spatial_index is not None:
@@ -158,15 +161,13 @@ def run_contextualize_stage(cfg, df, plans, indicator_cols, llm, spatial_index, 
 
         experience_cases = None
         if cfg.experience_enabled:
-            experience_cases = experience_store.query(region_id, window, cfg.experience_k)
+            experience_cases = experience_store.query(region_id, cfg.experience_k)
 
         write_json(features_path(cfg, region_id, start), {
             'target': feats, 'neighbors': neighbor_ctx, 'experience': experience_cases,
         })
 
-        system_prompt, user_prompt = prompts.contextualize_prompt(
-            cfg, region_id, window, feats, neighbor_ctx, experience_cases)
-        text = llm.chat(system_prompt, user_prompt)
+        text = prompts.build_context_text(cfg, feats, neighbor_ctx, experience_cases)
         write_text(summary_path(cfg, region_id, start), text)
 
     _run_tasks(tasks, worker, cfg.workers, 'contextualize')
@@ -236,7 +237,10 @@ def run_predict_stage(cfg, df, plans, indicator_cols, llm):
         if cfg.mode == 'timeseries':
             system_prompt, user_prompt = prompts.predict_time_prompt(cfg, region_id, window, forecast_dates)
         else:  # timecp_ctx
-            text = read_text(summary_path(cfg, region_id, start)).replace('\n\n', ' ').strip()
+            # build_context_text() produces a structured, section-headed
+            # block (not free-form prose like the baseline's LLM report),
+            # so its blank lines are preserved rather than collapsed.
+            text = read_text(summary_path(cfg, region_id, start)).strip()
             system_prompt, user_prompt = prompts.predict_text_prompt(cfg, region_id, window, text, forecast_dates)
 
         raw = llm.chat(system_prompt, user_prompt, expect_numeric=True, n_values=cfg.horizon)

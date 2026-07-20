@@ -44,10 +44,11 @@ class ExperienceStore:
         self._fitted = True
         return self
 
-    def query(self, region_id, window, k):
+    def query(self, region_id, k):
         """
-        TODO: return up to `k` precedent cases most similar to `window`
-        (dicts with at least a 'summary' or 'series'/'outcome' field for
-        the prompt layer to render). Returns [] until implemented.
+        TODO: return up to `k` precedent cases most similar to this
+        region's current situation (dicts with at least a de-identified
+        'summary' field - no zipcode/exact dates - for the prompt layer to
+        render). Returns [] until implemented.
         """
         return []
