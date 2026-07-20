@@ -22,9 +22,16 @@ Three escalating, independently-ablatable context levels feed it:
                     latitude/longitude locates the top-k geographic
                     neighbors; reports their trend agreement and how this
                     region's momentum/price level compares to them.
-  context_level=3  + experience retrieval from the training pool - wired
-                    up end-to-end but a placeholder today (always returns
-                    no cases; see features/experience.py).
+  context_level=3  + experience retrieval from the training pool: k-NN
+                    search over training-pool windows pooled across *all*
+                    regions, either in a scale-invariant feature space
+                    (--experience-method features, default) or over
+                    z-normalized lookback-series shape (--experience-method
+                    shape, --experience-shape-metric euclidean|dtw). Reports
+                    an aggregated, de-identified outcome summary (median/
+                    range/direction-agreement across the top-k analogs),
+                    never which region/period a match came from - see
+                    features/experience.py.
 
 De-identification: nothing sent to the forecasting LLM ever names a zipcode
 or exact calendar date - geographic neighbors appear only as "Neighbor 1",
@@ -105,6 +112,14 @@ def parse_args():
     p.add_argument('--no-experience', dest='ctx_experience', action='store_false')
     p.set_defaults(ctx_experience=True)
     p.add_argument('--experience-k', type=int, default=3)
+    p.add_argument('--experience-method', default='features', choices=['features', 'shape'],
+                    help="'features'=k-NN on scale-invariant momentum/trend/volatility stats; "
+                         "'shape'=distance between z-normalized lookback series")
+    p.add_argument('--experience-shape-metric', default='euclidean', choices=['euclidean', 'dtw'],
+                    help='only used when --experience-method=shape')
+    p.add_argument('--experience-min-gap-months', type=int, default=None,
+                    help='min start-index gap between two retrieved analogs from the same region '
+                         '(default: = --lookback, i.e. no overlapping analogs)')
 
     p.add_argument('--model', default='openai/gpt-4o-mini')
     p.add_argument('--api-base', default='https://openrouter.ai/api/v1')
@@ -159,6 +174,9 @@ def build_config(args):
         longitude_column=args.longitude_column,
         ctx_experience=args.ctx_experience,
         experience_k=args.experience_k,
+        experience_method=args.experience_method,
+        experience_shape_metric=args.experience_shape_metric,
+        experience_min_gap_months=args.experience_min_gap_months,
         model=args.model,
         api_base=args.api_base,
         api_key_env=args.api_key_env,
@@ -192,13 +210,18 @@ def main():
     spatial_index = pipeline.build_spatial_index(cfg, df, plans)
     experience_store = ExperienceStore(cfg)
 
+    # `experience` must run before `contextualize` - contextualize *queries*
+    # the store that `experience` fits, so on a combined `--stage all` run
+    # the store needs to already be fitted (or loaded from a prior run's
+    # cache) by the time contextualize's workers start querying it.
+    #
     # Contextualization is deterministic (no LLM), so LLMClient - which
     # requires an API key unless --dry-run - is only constructed for the
     # stage that actually needs it.
-    if args.stage in ('contextualize', 'all'):
-        pipeline.run_contextualize_stage(cfg, df, plans, indicator_cols, spatial_index, experience_store)
     if args.stage in ('experience', 'all'):
         pipeline.run_experience_stage(cfg, df, plans, indicator_cols, experience_store)
+    if args.stage in ('contextualize', 'all'):
+        pipeline.run_contextualize_stage(cfg, df, plans, indicator_cols, spatial_index, experience_store)
     if args.stage in ('predict', 'all'):
         llm = LLMClient(cfg)
         pipeline.run_predict_stage(cfg, df, plans, indicator_cols, llm)

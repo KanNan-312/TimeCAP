@@ -11,7 +11,6 @@ from region_forecast.utils import ensure_dir, read_json, read_text, write_json, 
 from region_forecast_ctx import data as D
 from region_forecast_ctx import prompts
 from region_forecast_ctx.features import compute_target_features
-from region_forecast_ctx.features.experience import ExperienceStore
 from region_forecast_ctx.features.spatial_features import SpatialIndex, compute_neighbor_context
 
 
@@ -42,6 +41,11 @@ def meta_path(cfg, region_id):
 
 def metrics_path(cfg, region_id):
     return os.path.join(region_dir(cfg, region_id), 'metrics.json')
+
+
+def experience_store_prefix(cfg):
+    """Global (not per-region) - the store is fit once over the whole cross-region training pool."""
+    return os.path.join(cfg.results_dir, cfg.mode, cfg.ablation_tag, 'experience_store')
 
 
 # ---------------------------------------------------------------------------
@@ -131,6 +135,19 @@ def run_contextualize_stage(cfg, df, plans, indicator_cols, spatial_index, exper
         print('[contextualize] skipped (timeseries mode forecasts directly from numeric series)')
         return
 
+    if cfg.experience_enabled and not experience_store._fitted:
+        # Lets a standalone `--stage contextualize` run (without `experience`
+        # or `all` in the same invocation) pick up a store fitted earlier.
+        prefix = experience_store_prefix(cfg)
+        if os.path.exists(prefix + '.json'):
+            experience_store.load(prefix)
+            print(f'[contextualize] loaded cached experience store ({len(experience_store)} case(s), '
+                  f'method={experience_store.method}) from {prefix}.json')
+        else:
+            print(f'[contextualize] WARNING: experience retrieval enabled but no fitted store found at '
+                  f'{prefix}.json - run --stage experience (or --stage all) first. Precedent retrieval '
+                  f'will return no matches until then.')
+
     frames = _ok_frames(cfg, df, plans)
     date_idx = {}
     if spatial_index is not None:
@@ -161,7 +178,7 @@ def run_contextualize_stage(cfg, df, plans, indicator_cols, spatial_index, exper
 
         experience_cases = None
         if cfg.experience_enabled:
-            experience_cases = experience_store.query(region_id, cfg.experience_k)
+            experience_cases = experience_store.query(region_id, start, history, cfg.experience_k)
 
         write_json(features_path(cfg, region_id, start), {
             'target': feats, 'neighbors': neighbor_ctx, 'experience': experience_cases,
@@ -174,15 +191,24 @@ def run_contextualize_stage(cfg, df, plans, indicator_cols, spatial_index, exper
 
 
 # ---------------------------------------------------------------------------
-# Stage 2: experience - fits the (currently placeholder) ExperienceStore
-# over each region's training pool. A no-op today; wired up so
-# context_level=3 exercises the full pipeline shape once query() does
-# something. Skipped unless experience retrieval is enabled.
+# Stage 2: experience - fits ExperienceStore over the cross-region training
+# pool (see features/experience.py for the retrieval methods). Must run
+# before Stage 1's queries can return anything; persisted to disk so a
+# standalone `--stage contextualize` run can reuse a prior fit without
+# refitting (run_contextualize_stage loads it lazily if missing here).
+# Skipped unless experience retrieval is enabled.
 # ---------------------------------------------------------------------------
 
 def run_experience_stage(cfg, df, plans, indicator_cols, experience_store):
     if not cfg.experience_enabled:
         print('[experience] skipped (context_level < 3 or ctx_experience=False)')
+        return
+
+    prefix = experience_store_prefix(cfg)
+    if os.path.exists(prefix + '.json'):
+        experience_store.load(prefix)
+        print(f'[experience] loaded cached store ({len(experience_store)} case(s), '
+              f'method={experience_store.method}) from {prefix}.json')
         return
 
     frames = _ok_frames(cfg, df, plans)
@@ -201,8 +227,9 @@ def run_experience_stage(cfg, df, plans, indicator_cols, experience_store):
             })
 
     experience_store.fit(train_cases)
-    print(f'[experience] fitted placeholder store over {len(train_cases)} training-pool case(s) '
-          f'(retrieval not yet implemented - see features/experience.py)')
+    experience_store.save(prefix)
+    print(f'[experience] fitted store (method={cfg.experience_method}) over {len(train_cases)} training-pool '
+          f'case(s), {len(experience_store)} retained after outcome filtering -> {prefix}.*')
 
 
 # ---------------------------------------------------------------------------

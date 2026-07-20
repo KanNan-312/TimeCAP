@@ -16,8 +16,12 @@ toggleable so its contribution can be ablated:
   context_level 2  -> level 1 + spatio-temporal (geographic neighbor)
                        context, using haversine distance over
                        latitude/longitude to find the top-k nearest regions.
-  context_level 3  -> level 2 + experience retrieval from the training pool
-                       (placeholder - see features/experience.py).
+  context_level 3  -> level 2 + experience retrieval from the training pool:
+                       k-NN search over training-pool windows (cross-region),
+                       either in a small scale-invariant feature space
+                       ('features') or over z-normalized lookback-series
+                       shape ('shape' - Euclidean or DTW). See
+                       features/experience.py for the full design.
 
 A component only takes effect once *both* `context_level` has reached its
 tier *and* its own ctx_* flag is True, so you can e.g. run at
@@ -64,6 +68,9 @@ class Config(BaseConfig):
     # --- level-3 component toggle + params (experience retrieval) --------
     ctx_experience: bool = True
     experience_k: int = 3
+    experience_method: str = 'features'  # 'features' (k-NN on scale-invariant stats) | 'shape' (z-normalized series)
+    experience_shape_metric: str = 'euclidean'  # 'euclidean' | 'dtw' - only used when experience_method == 'shape'
+    experience_min_gap_months: Optional[int] = None  # None => defaults to `lookback` (no overlapping same-region analogs)
 
     def validate(self):
         if self.mode not in ('timeseries', 'timecp_ctx'):
@@ -75,6 +82,10 @@ class Config(BaseConfig):
             raise ValueError('lookback and horizon must be positive')
         if self.context_level not in (1, 2, 3):
             raise ValueError('context_level must be 1, 2, or 3')
+        if self.experience_method not in ('features', 'shape'):
+            raise ValueError(f'unknown experience_method: {self.experience_method}')
+        if self.experience_shape_metric not in ('euclidean', 'dtw'):
+            raise ValueError(f'unknown experience_shape_metric: {self.experience_shape_metric}')
 
     @property
     def spatial_enabled(self):
@@ -110,5 +121,15 @@ class Config(BaseConfig):
         if self.context_level >= 2:
             parts.append('spatial' if self.ctx_spatial else 'nospatial')
         if self.context_level >= 3:
-            parts.append('exp' if self.ctx_experience else 'noexp')
+            if self.ctx_experience:
+                tag = f'exp-{self.experience_method}'
+                if self.experience_method == 'shape':
+                    tag += f'-{self.experience_shape_metric}'
+                parts.append(tag)
+            else:
+                parts.append('noexp')
         return '_'.join(parts)
+
+    @property
+    def effective_experience_min_gap_months(self):
+        return self.experience_min_gap_months if self.experience_min_gap_months is not None else self.lookback

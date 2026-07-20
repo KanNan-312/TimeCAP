@@ -104,10 +104,36 @@ def spatial_block(s):
 
 
 def experience_block(cases):
+    """
+    Renders retrieved precedent cases (see features/experience.py) by rank,
+    distance, and outcome only - deliberately never by region/date, so the
+    model can't substitute memorized knowledge of a specific historical
+    case for genuine reasoning over the retrieved pattern.
+    """
     if not cases:
-        return ('- Similar historical cases: none retrieved (experience retrieval is a placeholder at this '
-                'ablation level and is not yet implemented)')
-    lines = ['- Similar historical cases:']
-    for i, c in enumerate(cases, 1):
-        lines.append(f"  {i}. {c.get('summary', c)}")
+        return ('- Similar historical cases: none retrieved (no comparable training-pool pattern found, or '
+                'experience retrieval is disabled at this ablation level)')
+
+    method = cases[0].get('method', 'pattern')
+    horizon = cases[0].get('horizon')
+    lines = [f"- Retrieved {len(cases)} similar historical pattern(s) from the training pool "
+             f"({method}-based similarity, nearest first):"]
+    for c in cases:
+        lines.append(
+            f"  {c['rank']}. distance={_fmt(c['distance'], 3)}: subsequent {horizon}-month change = "
+            f"{_fmt(c['cum_pct_change'])}% (direction={c['direction']})"
+        )
+
+    cum = [c['cum_pct_change'] for c in cases if c.get('cum_pct_change') is not None]
+    if cum:
+        n_up = sum(1 for c in cases if c['direction'] == 'up')
+        n_down = sum(1 for c in cases if c['direction'] == 'down')
+        n_flat = len(cases) - n_up - n_down
+        s = sorted(cum)
+        mid = len(s) // 2
+        median_cum = s[mid] if len(s) % 2 else (s[mid - 1] + s[mid]) / 2
+        lines.append(
+            f"- Aggregate across retrieved analogs: median subsequent change={_fmt(median_cum)}%, "
+            f"range=[{_fmt(min(cum))}%, {_fmt(max(cum))}%], {n_up} up / {n_down} down / {n_flat} flat"
+        )
     return '\n'.join(lines)
